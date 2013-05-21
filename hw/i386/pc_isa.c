@@ -162,7 +162,7 @@ static void pc_init1(MemoryRegion *system_memory,
 }
 
 
-/* PC init function for pc-0.10 to pc-0.13, and reused by xenfv */
+/* PC init function used by xenfv */
 static void pc_init_pci_no_kvmclock(QEMUMachineInitArgs *args)
 {
     ram_addr_t ram_size = args->ram_size;
@@ -174,10 +174,10 @@ static void pc_init_pci_no_kvmclock(QEMUMachineInitArgs *args)
     disable_kvm_pv_eoi();
     enable_compat_apic_id_mode();
     pc_init1(get_system_memory(),
-    get_system_io(),
-    ram_size, boot_device,
-    kernel_filename, kernel_cmdline,
-    initrd_filename, cpu_model, 1, 0);
+             get_system_io(),
+             ram_size, boot_device,
+             kernel_filename, kernel_cmdline,
+             initrd_filename, cpu_model, 1, 0);
 }
 
 
@@ -199,6 +199,28 @@ static void pc_init_isa(QEMUMachineInitArgs *args)
              kernel_filename, kernel_cmdline,
              initrd_filename, cpu_model, 0, 1);
 }
+
+/*
+static void pc_init_isa_xen_no_kvmclock(QEMUMachineInitArgs *args)
+{
+	ram_addr_t ram_size = args->ram_size;
+	const char *cpu_model = args->cpu_model;
+	const char *kernel_filename = args->kernel_filename;
+	const char *kernel_cmdline = args->kernel_cmdline;
+	const char *initrd_filename = args->initrd_filename;
+	const chat *boot_device = args->boot_device;
+	if (!xen_enabled() && cpu_model == NULL)
+		cpu_model = "486";		
+	disable_kvm_pv_eoi();
+	enable_compat_apic_id_mode();
+	pc_init1(get_system_memory(),
+			 get_system_io(),
+			 ram_size, boot_device,
+             kernel_filename, kernel_cmdline,
+		     initrd_filename, cpu_model, ( xen_enabled() ? 1 : 0 ),
+			 ( xen_enabled() ? 0 : 1) );
+}
+*/
 
 #ifdef CONFIG_XEN
 static void pc_xen_hvm_init(QEMUMachineInitArgs *args)
