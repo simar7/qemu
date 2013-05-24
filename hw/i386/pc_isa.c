@@ -27,8 +27,6 @@
 #include "hw/hw.h"
 #include "hw/i386/pc.h"
 #include "hw/i386/apic.h"
-#include "hw/pci/pci.h"
-#include "hw/pci/pci_ids.h"
 #include "hw/usb.h"
 #include "net/net.h"
 #include "hw/boards.h"
@@ -37,17 +35,14 @@
 #include "hw/kvm/clock.h"
 #include "sysemu/sysemu.h"
 #include "hw/sysbus.h"
+#include "hw/cpu/icc_bus.h"
 #include "sysemu/arch_init.h"
 #include "sysemu/blockdev.h"
 #include "hw/i2c/smbus.h"
-#include "hw/xen/xen.h"
 #include "exec/memory.h"
 #include "exec/address-spaces.h"
 #include "hw/acpi/acpi.h"
 #include "cpu.h"
-#ifdef CONFIG_XEN
-#  include <xen/hvm/hvm_info_table.h>
-#endif
 
 #define MAX_IDE_BUS 2
 
@@ -69,11 +64,9 @@ static void pc_init1(MemoryRegion *system_memory,
     int i;
     ram_addr_t below_4g_mem_size, above_4g_mem_size;
     ISABus *isa_bus;
-    int piix3_devfn = -1;
     qemu_irq *cpu_irq;
     qemu_irq *gsi;
     qemu_irq *i8259;
-    qemu_irq *smi_irq;
     GSIState *gsi_state;
     DriveInfo *hd[MAX_IDE_BUS * MAX_IDE_DEVS];
     BusState *idebus[MAX_IDE_BUS];
@@ -81,9 +74,13 @@ static void pc_init1(MemoryRegion *system_memory,
     ISADevice *floppy;
     MemoryRegion *ram_memory;
     MemoryRegion *rom_memory;
-    void *fw_cfg = NULL;
+    DeviceState *icc_bridge;
 
-    pc_cpus_init(cpu_model);
+    icc_bridge = qdev_create(NULL, TYPE_ICC_BRIDGE);
+    object_property_add_child(qdev_get_machine(), "icc-bridge",
+                              OBJECT(icc_bridge), NULL);
+
+    pc_cpus_init(cpu_model, icc_bridge);
     pc_acpi_init("acpi-dsdt.aml");
 
     if (kvmclock_enabled) {
@@ -101,12 +98,9 @@ static void pc_init1(MemoryRegion *system_memory,
     rom_memory = system_memory;
 
     /* allocate ram and load rom/bios */
-    if (!xen_enabled()) {
-        fw_cfg = pc_memory_init(system_memory,
-                       kernel_filename, kernel_cmdline, initrd_filename,
-                       below_4g_mem_size, above_4g_mem_size,
-                       rom_memory, &ram_memory);
-    }
+    pc_memory_init(system_memory, kernel_filename, kernel_cmdline,
+                   initrd_filename, below_4g_mem_size,
+                   above_4g_mem_size, rom_memory, &ram_memory);
 
     gsi_state = g_malloc0(sizeof(*gsi_state));
     if (kvm_irqchip_in_kernel()) {
@@ -122,8 +116,6 @@ static void pc_init1(MemoryRegion *system_memory,
 
     if (kvm_irqchip_in_kernel()) {
         i8259 = kvm_i8259_init(isa_bus);
-    } else if (xen_enabled()) {
-        i8259 = xen_interrupt_controller_init();
     } else {
         cpu_irq = pc_allocate_cpu_irq();
         i8259 = i8259_init(isa_bus, cpu_irq[0]);
@@ -139,7 +131,7 @@ static void pc_init1(MemoryRegion *system_memory,
     
 
     /* init basic PC hardware */
-    pc_basic_device_init(isa_bus, gsi, &rtc_state, &floppy, xen_enabled());
+    pc_basic_device_init(isa_bus, gsi, &rtc_state, &floppy, false);
 
     pc_nic_init(isa_bus, NULL); // simar: Passing NULL for pci_bus
 
@@ -153,31 +145,8 @@ static void pc_init1(MemoryRegion *system_memory,
             idebus[i] = qdev_get_child_bus(&dev->qdev, "ide.0");
         }
 
-    audio_init(isa_bus, NULL);
-
     pc_cmos_init(below_4g_mem_size, above_4g_mem_size, boot_device,
                  floppy, idebus[0], idebus[1], rtc_state);
-
-
-}
-
-
-/* PC init function used by xenfv */
-static void pc_init_pci_no_kvmclock(QEMUMachineInitArgs *args)
-{
-    ram_addr_t ram_size = args->ram_size;
-    const char *cpu_model = args->cpu_model;
-    const char *kernel_filename = args->kernel_filename;
-    const char *kernel_cmdline = args->kernel_cmdline;
-    const char *initrd_filename = args->initrd_filename;
-    const char *boot_device = args->boot_device;
-    disable_kvm_pv_eoi();
-    enable_compat_apic_id_mode();
-    pc_init1(get_system_memory(),
-             get_system_io(),
-             ram_size, boot_device,
-             kernel_filename, kernel_cmdline,
-             initrd_filename, cpu_model, 1, 0);
 }
 
 
@@ -197,41 +166,10 @@ static void pc_init_isa(QEMUMachineInitArgs *args)
              get_system_io(),
              ram_size, boot_device,
              kernel_filename, kernel_cmdline,
-             initrd_filename, cpu_model, 0, 1);
+             initrd_filename, cpu_model, 1);
 }
 
-/*
-static void pc_init_isa_xen_no_kvmclock(QEMUMachineInitArgs *args)
-{
-	ram_addr_t ram_size = args->ram_size;
-	const char *cpu_model = args->cpu_model;
-	const char *kernel_filename = args->kernel_filename;
-	const char *kernel_cmdline = args->kernel_cmdline;
-	const char *initrd_filename = args->initrd_filename;
-	const chat *boot_device = args->boot_device;
-	if (!xen_enabled() && cpu_model == NULL)
-		cpu_model = "486";		
-	disable_kvm_pv_eoi();
-	enable_compat_apic_id_mode();
-	pc_init1(get_system_memory(),
-			 get_system_io(),
-			 ram_size, boot_device,
-             kernel_filename, kernel_cmdline,
-		     initrd_filename, cpu_model, ( xen_enabled() ? 1 : 0 ),
-			 ( xen_enabled() ? 0 : 1) );
-}
-*/
 
-#ifdef CONFIG_XEN
-static void pc_xen_hvm_init(QEMUMachineInitArgs *args)
-{
-    if (xen_hvm_init() != 0) {
-        hw_error("xen hardware virtual machine initialisation failed");
-    }
-    pc_init_pci_no_kvmclock(args);
-    xen_vcpu_init();
-}
-#endif
 
 static QEMUMachine isapc_machine = {
     .name = "isapc",
@@ -249,25 +187,10 @@ static QEMUMachine isapc_machine = {
     DEFAULT_MACHINE_OPTIONS,
 };
 
-#ifdef CONFIG_XEN
-static QEMUMachine xenfv_machine = {
-    .name = "xenfv",
-    .desc = "Xen Fully-virtualized PC",
-    .init = pc_xen_hvm_init,
-    .max_cpus = HVM_MAX_VCPUS,
-    .default_machine_opts = "accel=xen",
-    DEFAULT_MACHINE_OPTIONS,
-};
-#endif
-
 
 static void pc_machine_init(void)
 {
     qemu_register_machine(&isapc_machine);
-#ifdef CONFIG_XEN
-    qemu_register_machine(&xenfv_machine);
-#endif
-
 }
 
 machine_init(pc_machine_init);
