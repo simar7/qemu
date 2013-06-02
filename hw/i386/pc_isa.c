@@ -39,6 +39,7 @@
 #include "sysemu/arch_init.h"
 #include "sysemu/blockdev.h"
 #include "hw/i2c/smbus.h"
+#include "hw/xen/xen.h"
 #include "exec/memory.h"
 #include "exec/address-spaces.h"
 #include "hw/acpi/acpi.h"
@@ -49,6 +50,8 @@
 static const int ide_iobase[MAX_IDE_BUS] = { 0x1f0, 0x170 };
 static const int ide_iobase2[MAX_IDE_BUS] = { 0x3f6, 0x376 };
 static const int ide_irq[MAX_IDE_BUS] = { 14, 15 };
+
+static bool has_pvpanic = true;
 
 /* PC hardware initialisation */
 static void pc_init1(MemoryRegion *system_memory,
@@ -98,12 +101,16 @@ static void pc_init1(MemoryRegion *system_memory,
     rom_memory = system_memory;
 
     /* allocate ram and load rom/bios */
-    pc_memory_init(system_memory, kernel_filename, kernel_cmdline,
-                   initrd_filename, below_4g_mem_size,
-                   above_4g_mem_size, rom_memory, &ram_memory);
+    if (!xen_enabled()) {
+        pc_memory_init(system_memory, kernel_filename, 
+                       kernel_cmdline, initrd_filename,
+                       below_4g_mem_size, above_4g_mem_size,
+                       rom_memory, &ram_memory);
+    }
 
     gsi_state = g_malloc0(sizeof(*gsi_state));
     if (kvm_irqchip_in_kernel()) {
+        kvm_pc_setup_irq_routing(false);
         gsi = qemu_allocate_irqs(kvm_pc_gsi_handler, gsi_state,
                                  GSI_NUM_PINS);
     } else {
@@ -116,6 +123,8 @@ static void pc_init1(MemoryRegion *system_memory,
 
     if (kvm_irqchip_in_kernel()) {
         i8259 = kvm_i8259_init(isa_bus);
+    } else if (xen_enabled()) {
+        i8259 = xen_interrupt_controller_init();
     } else {
         cpu_irq = pc_allocate_cpu_irq();
         i8259 = i8259_init(isa_bus, cpu_irq[0]);
@@ -125,28 +134,35 @@ static void pc_init1(MemoryRegion *system_memory,
         gsi_state->i8259_irq[i] = i8259[i];
     }
 
+    qdev_init_nofail(icc_bridge);
+
     pc_register_ferr_irq(gsi[13]);
 
     pc_vga_init(isa_bus, NULL);
-    
 
     /* init basic PC hardware */
-    pc_basic_device_init(isa_bus, gsi, &rtc_state, &floppy, false);
+    pc_basic_device_init(isa_bus, gsi, &rtc_state, &floppy, xen_enabled());
 
     pc_nic_init(isa_bus, NULL); 
 
     ide_drive_get(hd, MAX_IDE_BUS);
     
     for(i = 0; i < MAX_IDE_BUS; i++) {
-            ISADevice *dev;
-            dev = isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i],
-                               ide_irq[i],
-                               hd[MAX_IDE_DEVS * i], hd[MAX_IDE_DEVS * i + 1]);
-            idebus[i] = qdev_get_child_bus(&dev->qdev, "ide.0");
-        }
+        ISADevice *dev;
+        dev = isa_ide_init(isa_bus, ide_iobase[i], ide_iobase2[i],
+                           ide_irq[i],
+                           hd[MAX_IDE_DEVS * i], hd[MAX_IDE_DEVS * i + 1]);
+        idebus[i] = qdev_get_child_bus(&dev->qdev, "ide.0");
+    }
 
     pc_cmos_init(below_4g_mem_size, above_4g_mem_size, boot_device,
                  floppy, idebus[0], idebus[1], rtc_state);
+
+
+    if (has_pvpanic) {
+        pvpanic_init(isa_bus);
+    }
+
 }
 
 
@@ -158,6 +174,7 @@ static void pc_init_isa(QEMUMachineInitArgs *args)
     const char *kernel_cmdline = args->kernel_cmdline;
     const char *initrd_filename = args->initrd_filename;
     const char *boot_device = args->boot_device;
+    has_pvpanic = false;
     if (cpu_model == NULL)
         cpu_model = "486";
     disable_kvm_pv_eoi();
